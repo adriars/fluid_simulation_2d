@@ -3,7 +3,7 @@ use bevy::{
     prelude::*,
 };
 
-use crate::fluid_simulation::{Particle, SimulationParameters, SmoothingRadiusDebug};
+use crate::fluid_simulation::{Particle, SimulationParameters, SmoothingRadiusDebug, MAX_TIME_STEP, MIN_TIME_STEP};
 
 pub struct UIDebug;
 
@@ -15,6 +15,8 @@ struct TargetDensityUiNode;
 struct PressureMultiplierUiNode;
 #[derive(Component)]
 struct ParticleSmoothingRadiusUiNode;
+#[derive(Component)]
+struct ParticleTimeStepUiNode;
 
 impl Plugin for UIDebug {
     fn build(&self, app: &mut App) {
@@ -52,10 +54,22 @@ fn spawn_ui_debug_nodes(mut commands: Commands,
         .with_child((
             Text::new(format!("Particle smoothing radius: {} (S)", simulation_parameters.particle_smoothing_radius)),
             ParticleSmoothingRadiusUiNode,
+        )).with_child((
+            Text::new(format!("Time step {} (T)", simulation_parameters.time_step)),
+            ParticleTimeStepUiNode,
         ))
         .with_child(Text::new("Bounding box (B)"))
         .with_child(Text::new("Zoom (Z)"))
-        .with_child(Text::new("Hold the legend key + mouse scroll wheel to modify the parameters (hold left shift to bigger steps)"));
+        .with_child(
+            (Node {
+                // fill the entire window
+                width: Val::Percent(100.),
+                height: Val::Percent(100.),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::End,
+                ..Default::default()
+            })
+        ).with_child(Text::new("Hold the legend key + mouse scroll wheel to modify the parameters (hold left shift to bigger steps)"));
 
 }
 
@@ -99,6 +113,16 @@ fn update_particle_smoothing_radius_ui_node(
     );
 }
 
+fn update_time_step_ui_node(
+    particle_time_step_ui_node: &mut Query<&mut Text, With<ParticleTimeStepUiNode>>,
+    simulation_parameters: &ResMut<SimulationParameters>
+) {
+    particle_time_step_ui_node.single_mut().unwrap().0 = format!(
+        "Time step {} (T)",
+        simulation_parameters.time_step
+    );
+}
+
 fn update_ui_debug_nodes(
     mouse_wheel_input: Res<AccumulatedMouseScroll>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
@@ -107,7 +131,8 @@ fn update_ui_debug_nodes(
         Query<&mut Text, With<GravityUiNode>>,
         Query<&mut Text, With<TargetDensityUiNode>>,
         Query<&mut Text, With<PressureMultiplierUiNode>>,
-        Query<&mut Text, With<ParticleSmoothingRadiusUiNode>>
+        Query<&mut Text, With<ParticleSmoothingRadiusUiNode>>,
+        Query<&mut Text, With<ParticleTimeStepUiNode>>
     )>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut query: Query<&mut Mesh2d, With<SmoothingRadiusDebug>>
@@ -171,5 +196,23 @@ fn update_ui_debug_nodes(
         for mut mesh2d in query.iter_mut() {
             mesh2d.0 = meshes.add(Circle::new(simulation_parameters.particle_smoothing_radius));
        }
+    }
+
+    // Simulation speed UI node
+    if keyboard_input.pressed(KeyCode::KeyT) && keyboard_input.pressed(KeyCode::ShiftLeft) {
+
+            simulation_parameters.time_step = (simulation_parameters.time_step + mouse_wheel_input.delta.y * 1.0).clamp(MIN_TIME_STEP, MAX_TIME_STEP);
+
+        update_time_step_ui_node(&mut ui_nodes.p4(), &simulation_parameters);
+
+    }
+
+    if keyboard_input.pressed(KeyCode::KeyT) {
+
+            simulation_parameters.time_step = (simulation_parameters.time_step + mouse_wheel_input.delta.y * 0.1).clamp(MIN_TIME_STEP, MAX_TIME_STEP);
+
+
+        update_time_step_ui_node(&mut ui_nodes.p4(), &simulation_parameters);
+
     }
 }

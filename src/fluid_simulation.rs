@@ -2,14 +2,24 @@ use rand::{seq::index, Rng};
 use std::{cell, f32::consts::PI};
 
 use bevy::{
-    color::palettes::css::{BLUE, RED}, math::VectorSpace, pbr::{ExtendedMaterial, MaterialExtension}, prelude::*, render::render_resource::{AsBindGroup, ShaderRef}, sprite::{Material2d, Material2dPlugin}
+    color::palettes::css::{BLUE, RED},
+    math::{ops::powf, VectorSpace},
+    prelude::*,
 };
 
 const GRAVITY: f32 = 9.81;
 
 const TARGET_DENSITY: f32 = 1.0;
+pub const MIN_TARGET_DENSITY: f32 = 0.0;
+pub const MAX_TARGET_DENSITY: f32 = 100.0;
 
 const PRESSURE_MULTIPLIER: f32 = 1.0;
+pub const MIN_PRESSURE_MULTIPLIER: f32 = 0.0;
+pub const MAX_PRESSURE_MULTIPLIER: f32 = 100.0;
+
+const TIME_STEP: f32 = 30.0;
+pub const MIN_TIME_STEP: f32 = 10.0;
+pub const MAX_TIME_STEP: f32 = 500.0;
 
 const PARTICLE_NUMBER: u32 = 1000;
 const PARTICLE_SPACING: f32 = 0.1;
@@ -28,10 +38,11 @@ impl Plugin for FluidSimulation {
             target_density: TARGET_DENSITY,
             pressure_multiplier: PRESSURE_MULTIPLIER,
             particle_smoothing_radius: PARTICLE_SMOOTHING_RADIUS,
+            time_step: TIME_STEP
         })
-        .add_plugins(Material2dPlugin::<VelocityMaterial>::default())
         .add_systems(Startup, spawn_particles)
-        .add_systems(Update, simulate_fluid)
+        // .add_systems(Update, simulate_fluid)
+        .add_systems(Update, simulate)
         .add_systems(Update, visual_debug);
     }
 }
@@ -56,26 +67,14 @@ pub struct SimulationParameters {
     pub target_density: f32,
     pub pressure_multiplier: f32,
     pub particle_smoothing_radius: f32,
-}
-
-#[derive(Asset, AsBindGroup, TypePath, Debug, Clone)]
-pub struct VelocityMaterial {
-    #[uniform(0)]
-    pub velocity: f32,
-}
-
-impl Material2d for VelocityMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "shaders/velocity_color_shader.wgsl".into()
-    }
+    pub time_step: f32
 }
 
 // Spawns all the fluid particles
 fn spawn_particles(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>
-    // mut materials: ResMut<Assets<VelocityMaterial>>
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let particles_per_row: f32 = f32::sqrt(PARTICLE_NUMBER as f32);
     let particles_per_col: f32 = (PARTICLE_NUMBER - 1) as f32 / particles_per_row + 1.0;
@@ -85,8 +84,8 @@ fn spawn_particles(
     let mut y: f32;
 
     for i in 0..PARTICLE_NUMBER {
-        x = (i as f32 % particles_per_row - particles_per_row / 2.0) * spacing;
-        y = (i as f32 / particles_per_row - particles_per_col / 2.0) * spacing;
+        x = (i as f32 % particles_per_row - particles_per_row / 2.0).round() * spacing;
+        y = (i as f32 / particles_per_row - particles_per_col / 2.0).round() * spacing;
 
         //println!("x: {x} y: {y}");
 
@@ -97,17 +96,14 @@ fn spawn_particles(
                 mass: PARTICLE_MASS,
                 density: PARTICLE_INITIAL_DENSITY,
                 pressure_force: Vec3::ZERO,
-                position: Vec3::new(x, y, 0.0),
-                // position: Vec3::new(rand::rng().random_range(-12.0..=12.0), rand::rng().random_range(-12.0..=12.0), 0.0),
+                position: Vec3::new(rand::rng().random_range(-12.0..=12.0), rand::rng().random_range(-12.0..=12.0), 0.0),
                 cell_key: 0
             },
             Mesh2d(meshes.add(Circle::new(PARTICLE_SIZE))),
             MeshMaterial2d(materials.add(ColorMaterial::from_color(RED))),
-            // MeshMaterial2d(materials.add(color)),
-            Transform::from_xyz(x, y, 0.0),
-            // Transform::from_xyz(rand::rng().random_range(-12.0..=12.0), rand::rng().random_range(-12.0..=12.0), 0.0),
+            Transform::from_xyz(rand::rng().random_range(-12.0..=12.0), rand::rng().random_range(-12.0..=12.0), 0.0),
         ))/* .with_child((
-            Transform::from_scale(Vec3::new(0.025, 0.025, 1.0)),
+            Transform::from_scale(Vec3::new(0.1, 0.1, 1.0)),
             Text2d::new(""),
         )) *//* .with_child((
             Mesh2d(meshes.add(Circle::new(PARTICLE_SMOOTHING_RADIUS))),
@@ -167,254 +163,74 @@ fn convert_density_to_pressure(
     return pressure;
 }
 
-// Simulate the fluid
-fn simulate_fluid(
-    mut particles_transform: Query<&mut Transform, With<Particle>>,
-    mut particles: Query<&mut Particle>,
+fn simulate (
+    mut query: Query<(&mut Particle, &mut Transform)>,
     time: Res<Time>,
     simulation_parameters: Res<SimulationParameters>,
-    mut materials: ResMut<Assets<VelocityMaterial>>,
 ) {
-    // Create all the buffers that will serve as a cache for the particle values
-    let mut cached_positions: [Vec3; PARTICLE_NUMBER as usize] = [Vec3::ZERO; PARTICLE_NUMBER as usize];
 
-    let mut cached_predicted_positions: [Vec3; PARTICLE_NUMBER as usize] = [Vec3::ZERO; PARTICLE_NUMBER as usize];
+    // Reset the density and pressure force for all the particles
+    query.par_iter_mut().for_each(|(mut particle, _)| {
+        particle.density = 1.0;
+        particle.pressure_force = Vec3::ZERO;
+    });
 
-    let mut cached_velocities: [Vec3; PARTICLE_NUMBER as usize] = [Vec3::ZERO; PARTICLE_NUMBER as usize];
 
-    let mut cached_densities: [f32; PARTICLE_NUMBER as usize] = [TARGET_DENSITY; PARTICLE_NUMBER as usize];
+    // Predict the particle positions based on their current velocity
+    query.par_iter_mut().for_each(|(mut particle, transform)| {
 
-    let mut cached_pressure_forces: [Vec3; PARTICLE_NUMBER as usize] = [Vec3::ZERO; PARTICLE_NUMBER as usize];
+        particle.position = transform.translation + particle.velocity * 1.0 / simulation_parameters.time_step;
+    });
 
-    let mut cached_cell_coords: [(i32, i32); PARTICLE_NUMBER as usize] = [(0, 0); PARTICLE_NUMBER as usize];
+    // Get all the particle pairs without repetition
+    let mut combinations = query.iter_combinations_mut();
 
-    let mut cached_cell_keys: [u32; PARTICLE_NUMBER as usize] = [u32::MAX; PARTICLE_NUMBER as usize];
+    // Calculate density
+    while let Some([(mut particle_a, transform_a), (mut particle_b, transform_b)]) = combinations.fetch_next() {
+        // Particle a
+        let distance = Vec3::length(particle_b.position - particle_a.position);
+        let influence = smoothing_kernel(simulation_parameters.particle_smoothing_radius, distance);
+        particle_a.density += influence;
 
-    let mut spatial_lookup: [(usize, u32); PARTICLE_NUMBER as usize] = [(0, 0); PARTICLE_NUMBER as usize];
-
-    let mut start_indices: [u32; PARTICLE_NUMBER as usize] = [u32::MAX; PARTICLE_NUMBER as usize];
-
-    let cell_offsets: [(i32, i32); 9] = [(-1, 1), (0, 1), (1, 1), (-1, 0), (0, 0), (1, 0), (-1, -1), (0, -1), (1, -1)];
-
-    // Loop over all particles to save their positions on the cache buffer
-    for (i, particle_transform) in particles_transform.iter().enumerate() {
-
-        // Save all the particle positions
-        cached_positions[i] = particle_transform.translation;
-
-        // You can use predicted positions instead to improve simulation results
-        cached_predicted_positions[i] = cached_positions[i] + cached_velocities[i] / 160.0;
-
-        // Update spatial lookup buffer
-        // Calculate the cell key for each particle based on its current position
-
-        // Get the cell coordinates
-        let cell_x = (cached_predicted_positions[i].x / simulation_parameters.particle_smoothing_radius) as i32;
-        let cell_y = (cached_predicted_positions[i].y / simulation_parameters.particle_smoothing_radius) as i32;
-
-        // Save the cell coordinates to the cache buffer
-        cached_cell_coords[i] = (cell_x, cell_y);
-
-        // Hash the cell coordinates to a single number (this makes easier to work with)
-        let cell_hash_x = cell_x * 15823;
-        let cell_hash_y = cell_y * 9737333;
-        let cell_hash = (cell_hash_x + cell_hash_y) as u32;
-
-        // Get the cell key
-        let cell_key = cell_hash % PARTICLE_NUMBER;
-
-        // Save the cell key for each particle into the cache buffer
-        cached_cell_keys[i] = cell_key;
-
-        // Save the particle index and its current cell key to the cache buffer
-        spatial_lookup[i] = (i, cell_key);
-
+        // Particle b
+        let distance = Vec3::length(particle_a.position - particle_b.position);
+        let influence = smoothing_kernel(simulation_parameters.particle_smoothing_radius, distance);
+        particle_b.density += influence;
     }
 
-    // Sort the spatial lookup array ordered by the cell key
-    spatial_lookup.sort_by_key(|k| k.1);
+    let mut combinations = query.iter_combinations_mut();
 
-    // Calculate the start indice of each cell (the starting position on the spatial lookup array from where the particles are stored for each cell)
-    for i in 0..PARTICLE_NUMBER as usize {
+    // Calculate pressure force
+    while let Some([(mut particle_a, transform_a), (mut particle_b, transform_b)]) = combinations.fetch_next() {
 
-        let key = spatial_lookup[i].1;
+        let shared_pressure_force = (convert_density_to_pressure(particle_b.density, &simulation_parameters) + convert_density_to_pressure(particle_a.density, &simulation_parameters)) / 2.0;
 
-        let key_prev;
-
-        if i == 0 {
-            key_prev = u32::MAX;
-        } else {
-            key_prev = spatial_lookup[i - 1].1;
-        }
-
-        if key != key_prev {
-            start_indices[key as usize] = i as u32;
-        }
-
-    }
-
-    // Update velocity material
-    /* for (i, material) in materials.iter_mut().enumerate() {
-        material.1.velocity = cached_cell_keys[i] as f32 / 1000.0;
-    } */
-
-    for i in 0..PARTICLE_NUMBER as usize {
-
-        let mut density = 1.0;
-
-        // Get the center of the 3x3 grid cell keys bounding box (inside of which we need to check for the influence of other particles)
-        let center_x = cached_cell_coords[i].0;
-        let center_y = cached_cell_coords[i].1;
-
-        let sqr_radius = simulation_parameters.particle_smoothing_radius * simulation_parameters.particle_smoothing_radius;
-
-        for (cell_offset_x, cell_offset_y) in cell_offsets {
-
-            // Get the cell hash of the current offset grid cell
-            let cell_hash_x = (center_x + cell_offset_x) * 15823;
-            let cell_hash_y = (center_y + cell_offset_y) * 9737333;
-            let cell_hash = (cell_hash_x + cell_hash_y) as u32;
-
-            // Get the cell key of the current offset grid cell
-            let cell_key = cell_hash % PARTICLE_NUMBER;
-
-            // Get the starting position of the spatial lookup array from where the particles inside this offset grid cell are stored
-            let cell_start_index = start_indices[cell_key as usize] as usize;
-
-            // Check all the particles inside the current offset grid cell
-            for j in cell_start_index..PARTICLE_NUMBER as usize {
-
-                // Break loop if the cell key is different (if the cell key is different it means that the particle is outside this offset grid cell)
-                if spatial_lookup[j].1 != cell_key {
-                    break;
-                }
-
-                // Get the particle index
-                let particle_index = spatial_lookup[j].0;
-
-                let sqr_dst = Vec3::length_squared(cached_predicted_positions[particle_index] - cached_predicted_positions[i]);
-
-                // Test if the point is inside the radius
-                if sqr_dst <= sqr_radius {
-
-                    let distance = Vec3::length( cached_predicted_positions[particle_index] - cached_predicted_positions[i]);
-
-                    let influence = smoothing_kernel(simulation_parameters.particle_smoothing_radius, distance);
-
-                    density = density + PARTICLE_MASS * influence;
-                    
-                }
-            }
-
-        }
-
-        cached_densities[i] = density;
-    }
-
-    for i in 0..PARTICLE_NUMBER as usize {
-
-        let mut pressure_force = Vec3::ZERO;
-
-        // Get the center of the 3x3 grid cell keys bounding box (inside of which we need to check for the influence of other particles)
-        let center_x = cached_cell_coords[i].0;
-        let center_y = cached_cell_coords[i].1;
-
-        let sqr_radius = simulation_parameters.particle_smoothing_radius * simulation_parameters.particle_smoothing_radius;
-
-        for (cell_offset_x, cell_offset_y) in cell_offsets {
-
-            // Get the cell hash of the current offset grid cell
-            let cell_hash_x = (center_x + cell_offset_x) * 15823;
-            let cell_hash_y = (center_y + cell_offset_y) * 9737333;
-            let cell_hash = (cell_hash_x + cell_hash_y) as u32;
-
-            // Get the cell key of the current offset grid cell
-            let cell_key = cell_hash % PARTICLE_NUMBER;
-
-            // Get the starting position of the spatial lookup array from where the particles inside this offset grid cell are stored
-            let cell_start_index = start_indices[cell_key as usize] as usize;
-
-            // Check all the particles inside the current offset grid cell
-            for j in cell_start_index..PARTICLE_NUMBER as usize {
-
-                // Break loop if the cell key is different (if the cell key is different it means that the particle is outside this offset grid cell)
-                if spatial_lookup[j].1 != cell_key {
-                    break;
-                }
-
-                // Get the particle index
-                let particle_index = spatial_lookup[j].0;
-
-                // Skip calculating pressure on itself
-                if  i == particle_index {continue;}
-
-                let sqr_dst = Vec3::length_squared(cached_predicted_positions[particle_index] - cached_predicted_positions[i]);
-
-                // Test if the point is inside the radius
-                if sqr_dst <= sqr_radius {
-
-                    let distance = Vec3::length( cached_predicted_positions[particle_index] - cached_predicted_positions[i]);
-
-                    let direction;
-
-                    // If 2 particles are on the exact same spot choose a random direction to apply the pressure force
-                    if distance == 0.0 {
-
-                        direction = Vec3::new(
-                            rand::rng().random_range(-1.0..=1.0),
-                            rand::rng().random_range(-1.0..=1.0),
-                            0.0,
-                        );
-                        
-                    } else {
-
-                        direction = (cached_predicted_positions[particle_index] - cached_predicted_positions[i]) / distance;
-
-                    }
-
-                    let slope = smoothing_kernel_derivative(simulation_parameters.particle_smoothing_radius, distance);
-
-                    let pressure_force_a = convert_density_to_pressure(cached_densities[i], &simulation_parameters);
-                    let pressure_force_b = convert_density_to_pressure(cached_densities[particle_index], &simulation_parameters);
-
-                    let shared_pressure_force = (pressure_force_a + pressure_force_b) / 2.0;
-
-                    pressure_force += shared_pressure_force * direction * slope * PARTICLE_MASS / cached_densities[particle_index];
-
-                }
-            }
-
-        }
-
-        cached_pressure_forces[i] = pressure_force;
-
-    }
-
-    // Apply the calculated pressure force to all the particles
-    for (i, mut particle_transform) in particles_transform.iter_mut().enumerate() {
-
-        // Store each particle velocity in the cache buffer
-        cached_velocities[i] += (cached_pressure_forces[i] / cached_densities[i]) * time.delta_secs();
-
-        // Aply gravity
-        cached_velocities[i] += Vec3::NEG_Y * simulation_parameters.gravity * time.delta_secs();
+        // Particle a
+        let distance = Vec3::length(particle_b.position - particle_a.position);
+        let direction = (particle_b.position - particle_a.position) / distance;
+        let slope = smoothing_kernel_derivative(simulation_parameters.particle_smoothing_radius, distance);
+        particle_a.pressure_force += shared_pressure_force * direction * slope / particle_b.density;
         
-        // Apply movement to the bevy transform
-        particle_transform.translation += cached_velocities[i] /* * time.delta_secs() */;
-
+        // Particle b
+        let distance = Vec3::length(particle_a.position - particle_b.position);
+        let direction = (particle_a.position - particle_b.position) / distance;
+        let slope = smoothing_kernel_derivative(simulation_parameters.particle_smoothing_radius, distance);
+        particle_b.pressure_force += shared_pressure_force * direction * slope / particle_a.density;
     }
 
-    // Set all the debug info for each particle
-    for (i, mut particle) in particles.iter_mut().enumerate() {
+    // Apply gravity to all the particles
+     query.par_iter_mut().for_each(|(mut particle, transform)| {
 
-        particle.position = cached_positions[i];
-        particle.density = cached_densities[i];
-        particle.velocity = cached_velocities[i];
-        particle.pressure_force = cached_pressure_forces[i];
-        particle.cell_key = cached_cell_keys[i];
+        particle.velocity += Vec3::NEG_Y * simulation_parameters.gravity * 1.0 / simulation_parameters.time_step;
 
+    });
 
-    }
+    // Apply pressure force to all the particles
+    query.par_iter_mut().for_each(|(mut particle, mut transform)| {
 
+        let pressure_acceleration = particle.pressure_force / particle.density;
+        particle.velocity += pressure_acceleration * 1.0 / simulation_parameters.time_step;
+        transform.translation += particle.velocity * 1.0 / simulation_parameters.time_step;
+    });
 
 }

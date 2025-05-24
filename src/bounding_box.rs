@@ -1,6 +1,6 @@
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
 
-use crate::fluid_simulation::Particle;
+use crate::fluid_simulation::{Particle, SimulationParameters};
 
 const BOUNDING_BOX_SIZE: f32 = 25.0;
 const BOUNDING_BOX_MAX_SIZE: f32 = 200.0;
@@ -70,6 +70,7 @@ fn control_bounding_box(
 fn check_bounding_box_collision(
     mut particles: Query<(&mut Transform, &mut Particle)>,
     bounding_box: Query<&BoundingBoxStruct>,
+    simulation_parameters: Res<SimulationParameters>,
     time: Res<Time>
 ) {
     let bounding_box = bounding_box.single().unwrap();
@@ -82,19 +83,19 @@ fn check_bounding_box_collision(
         if particle_transform.translation.x.abs() > half_bounds_size.x {
             particle_transform.translation.x = half_bounds_size.x * particle_transform.translation.x.signum();
             particle.velocity *= -1.0 * BOUNDING_BOX_DAMPENING_FACTOR;
-            particle_transform.translation += particle.velocity * time.delta_secs();
+            particle_transform.translation += particle.velocity * 1.0 / simulation_parameters.time_step;
         }
 
         if particle_transform.translation.y.abs() > half_bounds_size.y {
             particle_transform.translation.y = half_bounds_size.y * particle_transform.translation.y.signum();
             particle.velocity *= -1.0 * BOUNDING_BOX_DAMPENING_FACTOR;
-            particle_transform.translation += particle.velocity * time.delta_secs();
+            particle_transform.translation += particle.velocity * 1.0 / simulation_parameters.time_step;
         }
 
         if particle_transform.translation.z.abs() > half_bounds_size.z {
             particle_transform.translation.z = half_bounds_size.z * particle_transform.translation.z.signum();
             particle.velocity *= -1.0 * BOUNDING_BOX_DAMPENING_FACTOR;
-            particle_transform.translation += particle.velocity * time.delta_secs();
+            particle_transform.translation += particle.velocity * 1.0 / simulation_parameters.time_step;
         }
     }
 }

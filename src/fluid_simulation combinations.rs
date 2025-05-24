@@ -106,7 +106,7 @@ fn spawn_particles(
 fn visual_debug(mut query: Query<(&Particle, &Children)>, mut text_query: Query<&mut Text2d>) {
     for (particle, children) in query.iter_mut() {
         for child in children.iter() {
-            if let Ok(mut text) = text_query.get_mut(*child) {
+            if let Ok(mut text) = text_query.get_mut(child) {
 
                 /* if particle.id % 100 == 0 {
                     text.0 = format!("id: {}\ndensity {:.2}\npressure force {:.2}\nvelocity {:.2}\ncell key {}", particle.id, particle.density, particle.pressure_force, particle.velocity, particle.cell_key);
